@@ -828,7 +828,8 @@ static void ApolloSearchTabScheduleLandingUpdate(UIViewController *vc) {
             nav.topViewController != root || nav.transitionCoordinator ||
             tabs.presentedViewController || nav.presentedViewController ||
             root.presentedViewController || !root.viewIfLoaded.window) return;
-        [ApolloSearchTabSearchBar(root) becomeFirstResponder];
+        BOOL focused = [ApolloSearchTabSearchBar(root) becomeFirstResponder];
+        ApolloLog(@"[SearchTabFixes] transition repeat focus=%d", focused);
     });
 }
 @end
@@ -865,15 +866,21 @@ static ApolloSearchTabTransitionShield *ApolloSearchTabInstallTransitionShield(
     return shield;
 }
 
-static void ApolloSearchTabObserveTransition(
-    ApolloSearchTabTransitionShield *shield, UINavigationController *nav
+static void ApolloSearchTabPopToRoot(
+    UITabBarController *tabs, UINavigationController *nav, UIViewController *root
 ) {
+    ApolloSearchTabTransitionShield *shield = ApolloSearchTabInstallTransitionShield(tabs, nav, root);
+    // UIKit's automatic reselect pop starts AFTER shouldSelect returns. Own
+    // the pop here so the shield observes the actual transition, like Posts.
+    NSArray<UIViewController *> *popped = [nav popToRootViewControllerAnimated:!UIAccessibilityIsReduceMotionEnabled()];
     if (!shield) return;
-    BOOL observing = [nav.transitionCoordinator animateAlongsideTransition:nil
+    BOOL observing = popped.count && [nav.transitionCoordinator animateAlongsideTransition:nil
         completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
             [shield finishCancelled:context.isCancelled];
         }];
     if (!observing) [shield removeFromSuperview];
+    ApolloLog(@"[SearchTabFixes] pop-to-root pages=%lu shielded=%d",
+              (unsigned long)popped.count, observing);
 }
 
 // Apollo requires an exact top-offset match before focusing Search (0x10008907c).
@@ -882,7 +889,8 @@ static void ApolloSearchTabObserveTransition(
 
 - (BOOL)tabBarController:(UITabBarController *)tabs
  shouldSelectViewController:(UIViewController *)page {
-    if (![page isKindOfClass:UINavigationController.class]) {
+    if (page != tabs.selectedViewController ||
+        ![page isKindOfClass:UINavigationController.class]) {
         return %orig(tabs, page);
     }
     UINavigationController *nav = (UINavigationController *)page;
@@ -890,11 +898,13 @@ static void ApolloSearchTabObserveTransition(
     if (![root isKindOfClass:objc_getClass("_TtC6Apollo20SearchViewController")]) {
         return %orig(tabs, page);
     }
-    if (page != tabs.selectedViewController || nav.viewControllers.count != 1) {
-        ApolloSearchTabTransitionShield *shield = ApolloSearchTabInstallTransitionShield(tabs, nav, root);
-        BOOL allowed = %orig(tabs, page);
-        ApolloSearchTabObserveTransition(shield, nav);
-        return allowed;
+    if (nav.viewControllers.count > 1) {
+        if (!IsLiquidGlass()) return %orig(tabs, page);
+        if (tabs.presentedViewController || nav.presentedViewController ||
+            nav.topViewController.presentedViewController || nav.transitionCoordinator ||
+            !nav.topViewController.viewIfLoaded.window) return NO;
+        ApolloSearchTabPopToRoot(tabs, nav, root);
+        return NO;
     }
     if (tabs.presentedViewController || nav.presentedViewController ||
         root.presentedViewController || nav.transitionCoordinator ||

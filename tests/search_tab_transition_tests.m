@@ -116,9 +116,24 @@ typedef NS_OPTIONS(NSUInteger, UIControlEvents) { UIControlEventTouchDown = 1 };
 @interface UINavigationController : UIViewController
 @property (nonatomic, copy) NSArray<UIViewController *> *viewControllers;
 @property (nonatomic, readonly) UIViewController *topViewController;
+@property (nonatomic, strong) QATransition *nextTransition;
+@property (nonatomic) BOOL rejectsPop;
+@property (nonatomic) BOOL synchronousPop;
+@property (nonatomic) BOOL lastAnimated;
+@property (nonatomic) NSUInteger popCount;
+- (NSArray<UIViewController *> *)popToRootViewControllerAnimated:(BOOL)animated;
 @end
 @implementation UINavigationController
 - (UIViewController *)topViewController { return self.viewControllers.lastObject; }
+- (NSArray<UIViewController *> *)popToRootViewControllerAnimated:(BOOL)animated {
+    self.popCount++;
+    self.lastAnimated = animated;
+    if (self.rejectsPop || self.viewControllers.count <= 1) return @[];
+    NSArray *popped = [self.viewControllers subarrayWithRange:NSMakeRange(1, self.viewControllers.count - 1)];
+    self.viewControllers = @[self.viewControllers.firstObject];
+    if (animated && !self.synchronousPop) self.transitionCoordinator = self.nextTransition;
+    return popped;
+}
 @end
 @interface UITabBarController : UIViewController
 @property (nonatomic, strong) UITabBar *tabBar;
@@ -138,7 +153,10 @@ typedef NS_OPTIONS(NSUInteger, UIControlEvents) { UIControlEventTouchDown = 1 };
 @implementation QASearchController @end
 
 static BOOL glass = YES;
+static BOOL reduceMotion;
 static BOOL IsLiquidGlass(void) { return glass; }
+static __attribute__((unused)) BOOL UIAccessibilityIsReduceMotionEnabled(void) { return reduceMotion; }
+static __attribute__((unused)) void ApolloLog(__unused NSString *format, ...) {}
 static id ApolloSendObject(UITabBarItem *item, __unused SEL selector) { return item.button; }
 static id ApolloObjectIvar(UITabBarItem *item, __unused const char *name) { return item.fallbackButton; }
 static UISearchBar *ApolloSearchTabSearchBar(UIViewController *root) {
@@ -146,6 +164,19 @@ static UISearchBar *ApolloSearchTabSearchBar(UIViewController *root) {
 }
 
 // PRODUCTION_SOURCE
+
+@interface QADelegate : NSObject
+@property (nonatomic) NSUInteger nativeCalls;
+- (BOOL)tabBarController:(UITabBarController *)tabs shouldSelectViewController:(UIViewController *)page;
+- (BOOL)nativeShouldSelect:(UITabBarController *)tabs page:(UIViewController *)page;
+@end
+@implementation QADelegate
+- (BOOL)nativeShouldSelect:(__unused UITabBarController *)tabs page:(__unused UIViewController *)page {
+    self.nativeCalls++;
+    return YES;
+}
+// PRODUCTION_RESELECT
+@end
 
 static NSUInteger checks;
 static void Require(BOOL condition, NSString *message) {
@@ -170,6 +201,9 @@ static void DrainMainQueue(void) {
 @property (nonatomic, strong) UINavigationController *nav;
 @property (nonatomic, strong) QASearchController *root;
 @property (nonatomic, strong) QATransition *transition;
+@property (nonatomic, strong) QADelegate *delegate;
+@property (nonatomic, copy) NSArray<UIViewController *> *originalStack;
+@property (nonatomic) NSUInteger automaticReselects;
 - (ApolloSearchTabTransitionShield *)install;
 - (void)completeCancelled:(BOOL)cancelled;
 @end
@@ -181,7 +215,11 @@ static void DrainMainQueue(void) {
         _root.viewIfLoaded = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 400, 800)];
         _root.viewIfLoaded.window = [NSObject new];
         _nav = [UINavigationController new];
-        _nav.viewControllers = @[_root, [UIViewController new]];
+        UIViewController *subreddit = [UIViewController new];
+        subreddit.viewIfLoaded = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 400, 800)];
+        subreddit.viewIfLoaded.window = _root.viewIfLoaded.window;
+        _originalStack = @[_root, subreddit];
+        _nav.viewControllers = _originalStack;
         _nav.tabBarItem = [UITabBarItem new];
         _tabs = [UITabBarController new];
         _tabs.selectedViewController = _nav;
@@ -192,18 +230,25 @@ static void DrainMainQueue(void) {
         _nav.tabBarItem.button = [[UIView alloc] initWithFrame:CGRectMake(240, 0, 80, 80)];
         [_tabs.tabBar addSubview:_nav.tabBarItem.button];
         _transition = [QATransition new];
+        _nav.nextTransition = _transition;
+        _delegate = [QADelegate new];
     }
     return self;
 }
 - (ApolloSearchTabTransitionShield *)install {
-    ApolloSearchTabTransitionShield *shield = ApolloSearchTabInstallTransitionShield(self.tabs, self.nav, self.root);
-    self.nav.transitionCoordinator = self.transition;
-    ApolloSearchTabObserveTransition(shield, self.nav);
-    return shield;
+    BOOL allowed = [self.delegate tabBarController:self.tabs shouldSelectViewController:self.nav];
+    // UIKit starts its automatic reselection only AFTER the delegate returns.
+    // The first fix removed the shield before this point and missed the pop.
+    if (allowed && self.tabs.selectedViewController == self.nav) {
+        self.automaticReselects++;
+        [self.nav popToRootViewControllerAnimated:YES];
+    }
+    UIView *last = self.tabs.viewIfLoaded.subviews.lastObject;
+    return [last isKindOfClass:ApolloSearchTabTransitionShield.class] ? (id)last : nil;
 }
 - (void)completeCancelled:(BOOL)cancelled {
     self.transition.cancelled = cancelled;
-    if (!cancelled) self.nav.viewControllers = @[self.root];
+    self.nav.viewControllers = cancelled ? self.originalStack : @[self.root];
     self.nav.transitionCoordinator = nil;
     [self.transition finish];
     DrainMainQueue();
@@ -214,6 +259,9 @@ int main(void) {
     @autoreleasepool {
         QAFixture *fixture = [QAFixture new];
         ApolloSearchTabTransitionShield *shield = [fixture install];
+        Require(fixture.nav.popCount == 1 && fixture.automaticReselects == 0 &&
+                fixture.delegate.nativeCalls == 0, @"Search owns exactly one pop before the delegate returns");
+        Require(fixture.nav.transitionCoordinator == fixture.transition, @"the real pop creates the observed coordinator");
         Require(shield.superview == fixture.tabs.viewIfLoaded, @"the dock stays shielded while UIKit disables it");
         Require(CGRectEqualToRect(shield.frame, fixture.tabs.tabBar.frame), @"only the dock's footprint is shielded");
         UIButton *repeat = (UIButton *)shield.subviews.firstObject;
@@ -258,9 +306,14 @@ int main(void) {
         Require(fixture.root.searchBar.focusCount == 0, @"a disappearing root cannot steal focus");
 
         fixture = [QAFixture new];
-        shield = ApolloSearchTabInstallTransitionShield(fixture.tabs, fixture.nav, fixture.root);
-        ApolloSearchTabObserveTransition(shield, fixture.nav);
-        Require(shield.superview == nil, @"a synchronous or rejected pop never leaves an input shield behind");
+        fixture.nav.synchronousPop = YES;
+        shield = [fixture install];
+        Require(shield == nil && fixture.nav.viewControllers.count == 1, @"a synchronous pop never leaves an input shield behind");
+
+        fixture = [QAFixture new];
+        fixture.nav.rejectsPop = YES;
+        shield = [fixture install];
+        Require(shield == nil && fixture.nav.viewControllers.count == 2, @"a rejected pop never leaves an input shield behind");
 
         fixture = [QAFixture new];
         fixture.transition.rejectsCompletion = YES;
@@ -278,11 +331,36 @@ int main(void) {
         glass = NO;
         Require(ApolloSearchTabInstallTransitionShield(fixture.tabs, fixture.nav, fixture.root) == nil, @"standard builds retain native behavior");
         glass = YES;
+        reduceMotion = YES;
+        shield = [fixture install];
+        Require(shield == nil && !fixture.nav.lastAnimated &&
+                fixture.nav.viewControllers.count == 1, @"Reduce Motion returns to Search without an animated shield");
+        reduceMotion = NO;
+        fixture = [QAFixture new];
         fixture.tabs.tabBar.hidden = YES;
         Require(ApolloSearchTabInstallTransitionShield(fixture.tabs, fixture.nav, fixture.root) == nil, @"a hidden dock never gets a shield");
         fixture.tabs.tabBar.hidden = NO;
         fixture.nav.viewControllers = @[fixture.root];
         Require(ApolloSearchTabInstallTransitionShield(fixture.tabs, fixture.nav, fixture.root) == nil, @"Search-root scrolling and focus keep the existing reselect path");
+
+        fixture = [QAFixture new];
+        glass = NO;
+        shield = [fixture install];
+        Require(shield == nil && fixture.delegate.nativeCalls == 1 &&
+                fixture.automaticReselects == 1, @"standard builds retain UIKit's post-delegate reselection");
+        glass = YES;
+
+        fixture = [QAFixture new];
+        fixture.tabs.selectedViewController = [UIViewController new];
+        shield = [fixture install];
+        Require(shield == nil && fixture.delegate.nativeCalls == 1 &&
+                fixture.nav.popCount == 0, @"switching into Search does not take over native tab selection");
+
+        fixture = [QAFixture new];
+        fixture.nav.transitionCoordinator = fixture.transition;
+        shield = [fixture install];
+        Require(shield == nil && fixture.nav.popCount == 0 &&
+                fixture.delegate.nativeCalls == 0, @"an existing interactive transition is not replaced by a tab pop");
     }
     printf("search tab transition: %lu checks passed\n", (unsigned long)checks);
     return 0;

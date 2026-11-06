@@ -14,8 +14,13 @@ source = (root / 'src/ApolloSearchTabFixes.xm').read_text()
 start = source.index('@interface ApolloSearchTabTransitionShield')
 end = source.index('// Apollo requires an exact top-offset match', start)
 fixture = (root / 'tests/search_tab_transition_tests.m').read_text()
+hook = source[source.index('%hook ApolloSearchTabSceneDelegate'):]
+method = hook[hook.index('- (BOOL)tabBarController:'):hook.index('    // Google mode')]
+method = method.replace('%orig(tabs, page)', '[self nativeShouldSelect:tabs page:page]')
+method = method.replace('objc_getClass("_TtC6Apollo20SearchViewController")', 'QASearchController.class')
 (build / 'search_tab_transition_tests.m').write_text(
-    fixture.replace('// PRODUCTION_SOURCE', source[start:end]))
+    fixture.replace('// PRODUCTION_SOURCE', source[start:end])
+           .replace('// PRODUCTION_RESELECT', method + '    return NO;\n}\n'))
 PY
 
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror \
