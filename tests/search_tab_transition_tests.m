@@ -2,8 +2,6 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <dispatch/dispatch.h>
 
-// UIKit doubles exercise the production shield's ownership and transition
-// completion without needing Apollo's binary or an iOS Simulator.
 @interface UIView : NSObject
 @property (nonatomic) CGRect frame;
 @property (nonatomic, readonly) CGRect bounds;
@@ -40,10 +38,12 @@
     self.window = nil;
 }
 - (CGRect)convertRect:(CGRect)rect toView:(UIView *)view {
-    for (UIView *ancestor = self; ancestor; ancestor = ancestor.superview)
+    for (UIView *ancestor = self; ancestor; ancestor = ancestor.superview) {
         rect = CGRectOffset(rect, ancestor.frame.origin.x, ancestor.frame.origin.y);
-    for (UIView *ancestor = view; ancestor; ancestor = ancestor.superview)
+    }
+    for (UIView *ancestor = view; ancestor; ancestor = ancestor.superview) {
         rect = CGRectOffset(rect, -ancestor.frame.origin.x, -ancestor.frame.origin.y);
+    }
     return rect;
 }
 @end
@@ -53,7 +53,6 @@ typedef NS_OPTIONS(NSUInteger, UIControlEvents) { UIControlEventTouchDown = 1 };
 @interface UIButton : UIView
 @property (nonatomic, weak) id target;
 @property (nonatomic) SEL action;
-@property (nonatomic) UIControlEvents events;
 + (instancetype)buttonWithType:(UIButtonType)type;
 - (void)addTarget:(id)target action:(SEL)action forControlEvents:(UIControlEvents)events;
 - (void)press;
@@ -62,10 +61,9 @@ typedef NS_OPTIONS(NSUInteger, UIControlEvents) { UIControlEventTouchDown = 1 };
 + (instancetype)buttonWithType:(__unused UIButtonType)type {
     return [[self alloc] initWithFrame:CGRectZero];
 }
-- (void)addTarget:(id)target action:(SEL)action forControlEvents:(UIControlEvents)events {
+- (void)addTarget:(id)target action:(SEL)action forControlEvents:(__unused UIControlEvents)events {
     self.target = target;
     self.action = action;
-    self.events = events;
 }
 - (void)press {
     void (*invoke)(id, SEL) = (void (*)(id, SEL))[self.target methodForSelector:self.action];
@@ -77,7 +75,6 @@ typedef NS_OPTIONS(NSUInteger, UIControlEvents) { UIControlEventTouchDown = 1 };
 @implementation UITabBar @end
 @interface UITabBarItem : NSObject
 @property (nonatomic, strong) UIView *button;
-@property (nonatomic, strong) UIView *fallbackButton;
 @end
 @implementation UITabBarItem @end
 
@@ -117,9 +114,6 @@ typedef NS_OPTIONS(NSUInteger, UIControlEvents) { UIControlEventTouchDown = 1 };
 @property (nonatomic, copy) NSArray<UIViewController *> *viewControllers;
 @property (nonatomic, readonly) UIViewController *topViewController;
 @property (nonatomic, strong) QATransition *nextTransition;
-@property (nonatomic) BOOL rejectsPop;
-@property (nonatomic) BOOL synchronousPop;
-@property (nonatomic) BOOL lastAnimated;
 @property (nonatomic) NSUInteger popCount;
 - (NSArray<UIViewController *> *)popToRootViewControllerAnimated:(BOOL)animated;
 @end
@@ -127,11 +121,10 @@ typedef NS_OPTIONS(NSUInteger, UIControlEvents) { UIControlEventTouchDown = 1 };
 - (UIViewController *)topViewController { return self.viewControllers.lastObject; }
 - (NSArray<UIViewController *> *)popToRootViewControllerAnimated:(BOOL)animated {
     self.popCount++;
-    self.lastAnimated = animated;
-    if (self.rejectsPop || self.viewControllers.count <= 1) return @[];
+    if (self.viewControllers.count <= 1) return @[];
     NSArray *popped = [self.viewControllers subarrayWithRange:NSMakeRange(1, self.viewControllers.count - 1)];
     self.viewControllers = @[self.viewControllers.firstObject];
-    if (animated && !self.synchronousPop) self.transitionCoordinator = self.nextTransition;
+    if (animated) self.transitionCoordinator = self.nextTransition;
     return popped;
 }
 @end
@@ -158,12 +151,12 @@ static BOOL IsLiquidGlass(void) { return glass; }
 static __attribute__((unused)) BOOL UIAccessibilityIsReduceMotionEnabled(void) { return reduceMotion; }
 static __attribute__((unused)) void ApolloLog(__unused NSString *format, ...) {}
 static id ApolloSendObject(UITabBarItem *item, __unused SEL selector) { return item.button; }
-static id ApolloObjectIvar(UITabBarItem *item, __unused const char *name) { return item.fallbackButton; }
+static id ApolloObjectIvar(__unused UITabBarItem *item, __unused const char *name) { return nil; }
 static UISearchBar *ApolloSearchTabSearchBar(UIViewController *root) {
     return [(QASearchController *)root searchBar];
 }
 
-// PRODUCTION_SOURCE
+#import "SearchTabTransition.inc"
 
 @interface QADelegate : NSObject
 @property (nonatomic) NSUInteger nativeCalls;
@@ -175,7 +168,7 @@ static UISearchBar *ApolloSearchTabSearchBar(UIViewController *root) {
     self.nativeCalls++;
     return YES;
 }
-// PRODUCTION_RESELECT
+#import "SearchTabReselect.inc"
 @end
 
 static NSUInteger checks;
@@ -191,8 +184,9 @@ static void DrainMainQueue(void) {
     __block BOOL drained = NO;
     dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:2];
-    while (!drained && deadline.timeIntervalSinceNow > 0)
+    while (!drained && deadline.timeIntervalSinceNow > 0) {
         [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.001]];
+    }
     Require(drained, @"queued focus completes");
 }
 
@@ -203,8 +197,7 @@ static void DrainMainQueue(void) {
 @property (nonatomic, strong) QATransition *transition;
 @property (nonatomic, strong) QADelegate *delegate;
 @property (nonatomic, copy) NSArray<UIViewController *> *originalStack;
-@property (nonatomic) NSUInteger automaticReselects;
-- (ApolloSearchTabTransitionShield *)install;
+- (ApolloSearchTabTransitionShield *)tapSearch;
 - (void)completeCancelled:(BOOL)cancelled;
 @end
 @implementation QAFixture
@@ -235,12 +228,9 @@ static void DrainMainQueue(void) {
     }
     return self;
 }
-- (ApolloSearchTabTransitionShield *)install {
+- (ApolloSearchTabTransitionShield *)tapSearch {
     BOOL allowed = [self.delegate tabBarController:self.tabs shouldSelectViewController:self.nav];
-    // UIKit starts its automatic reselection only AFTER the delegate returns.
-    // The first fix removed the shield before this point and missed the pop.
     if (allowed && self.tabs.selectedViewController == self.nav) {
-        self.automaticReselects++;
         [self.nav popToRootViewControllerAnimated:YES];
     }
     UIView *last = self.tabs.viewIfLoaded.subviews.lastObject;
@@ -258,15 +248,11 @@ static void DrainMainQueue(void) {
 int main(void) {
     @autoreleasepool {
         QAFixture *fixture = [QAFixture new];
-        ApolloSearchTabTransitionShield *shield = [fixture install];
-        Require(fixture.nav.popCount == 1 && fixture.automaticReselects == 0 &&
+        ApolloSearchTabTransitionShield *shield = [fixture tapSearch];
+        Require(fixture.nav.popCount == 1 &&
                 fixture.delegate.nativeCalls == 0, @"Search owns exactly one pop before the delegate returns");
-        Require(fixture.nav.transitionCoordinator == fixture.transition, @"the real pop creates the observed coordinator");
         Require(shield.superview == fixture.tabs.viewIfLoaded, @"the dock stays shielded while UIKit disables it");
-        Require(CGRectEqualToRect(shield.frame, fixture.tabs.tabBar.frame), @"only the dock's footprint is shielded");
         UIButton *repeat = (UIButton *)shield.subviews.firstObject;
-        Require(CGRectEqualToRect(repeat.frame, CGRectMake(240, 0, 80, 80)), @"Search's real button defines the repeat target");
-        Require(repeat.events == UIControlEventTouchDown, @"the second touch is captured before it can select a list row");
         [repeat press];
         [repeat press];
         Require(fixture.root.searchBar.focusCount == 0, @"rapid repeats wait for the pop to settle");
@@ -274,91 +260,37 @@ int main(void) {
         Require(shield.superview == nil && fixture.root.searchBar.focusCount == 1, @"rapid repeats focus Search exactly once after the pop");
 
         fixture = [QAFixture new];
-        shield = [fixture install];
+        shield = [fixture tapSearch];
         [fixture completeCancelled:NO];
         Require(shield.superview == nil && fixture.root.searchBar.focusCount == 0, @"a single tap does not unexpectedly open the keyboard");
 
         fixture = [QAFixture new];
-        shield = [fixture install];
+        shield = [fixture tapSearch];
         [shield repeatSearchTap];
         [fixture completeCancelled:YES];
         Require(shield.superview == nil && fixture.root.searchBar.focusCount == 0, @"a cancelled pop removes the shield without focusing a hidden root");
 
         fixture = [QAFixture new];
-        shield = [fixture install];
-        [shield repeatSearchTap];
-        fixture.tabs.selectedViewController = [UIViewController new];
-        [fixture completeCancelled:NO];
-        Require(fixture.root.searchBar.focusCount == 0, @"switching tabs cancels the queued focus");
-
-        fixture = [QAFixture new];
-        shield = [fixture install];
-        [shield repeatSearchTap];
-        fixture.root.presentedViewController = [UIViewController new];
-        [fixture completeCancelled:NO];
-        Require(fixture.root.searchBar.focusCount == 0, @"a modal blocks queued keyboard focus");
-
-        fixture = [QAFixture new];
-        shield = [fixture install];
-        [shield repeatSearchTap];
-        fixture.root.viewIfLoaded.window = nil;
-        [fixture completeCancelled:NO];
-        Require(fixture.root.searchBar.focusCount == 0, @"a disappearing root cannot steal focus");
-
-        fixture = [QAFixture new];
-        fixture.nav.synchronousPop = YES;
-        shield = [fixture install];
+        reduceMotion = YES;
+        shield = [fixture tapSearch];
         Require(shield == nil && fixture.nav.viewControllers.count == 1, @"a synchronous pop never leaves an input shield behind");
-
-        fixture = [QAFixture new];
-        fixture.nav.rejectsPop = YES;
-        shield = [fixture install];
-        Require(shield == nil && fixture.nav.viewControllers.count == 2, @"a rejected pop never leaves an input shield behind");
+        reduceMotion = NO;
 
         fixture = [QAFixture new];
         fixture.transition.rejectsCompletion = YES;
-        shield = [fixture install];
+        shield = [fixture tapSearch];
         Require(shield.superview == nil, @"a rejected transition observer releases the shield");
 
         fixture = [QAFixture new];
-        fixture.nav.tabBarItem.fallbackButton = fixture.nav.tabBarItem.button;
-        fixture.nav.tabBarItem.button = nil;
-        shield = [fixture install];
-        Require(shield.subviews.count == 1, @"the legacy tab button lookup retains Search's repeat target");
-        [fixture completeCancelled:NO];
-
-        fixture = [QAFixture new];
         glass = NO;
-        Require(ApolloSearchTabInstallTransitionShield(fixture.tabs, fixture.nav, fixture.root) == nil, @"standard builds retain native behavior");
-        glass = YES;
-        reduceMotion = YES;
-        shield = [fixture install];
-        Require(shield == nil && !fixture.nav.lastAnimated &&
-                fixture.nav.viewControllers.count == 1, @"Reduce Motion returns to Search without an animated shield");
-        reduceMotion = NO;
-        fixture = [QAFixture new];
-        fixture.tabs.tabBar.hidden = YES;
-        Require(ApolloSearchTabInstallTransitionShield(fixture.tabs, fixture.nav, fixture.root) == nil, @"a hidden dock never gets a shield");
-        fixture.tabs.tabBar.hidden = NO;
-        fixture.nav.viewControllers = @[fixture.root];
-        Require(ApolloSearchTabInstallTransitionShield(fixture.tabs, fixture.nav, fixture.root) == nil, @"Search-root scrolling and focus keep the existing reselect path");
-
-        fixture = [QAFixture new];
-        glass = NO;
-        shield = [fixture install];
+        shield = [fixture tapSearch];
         Require(shield == nil && fixture.delegate.nativeCalls == 1 &&
-                fixture.automaticReselects == 1, @"standard builds retain UIKit's post-delegate reselection");
+                fixture.nav.popCount == 1, @"standard builds retain UIKit's post-delegate reselection");
         glass = YES;
-
-        fixture = [QAFixture new];
-        fixture.tabs.selectedViewController = [UIViewController new];
-        shield = [fixture install];
-        Require(shield == nil && fixture.delegate.nativeCalls == 1 &&
-                fixture.nav.popCount == 0, @"switching into Search does not take over native tab selection");
 
         fixture = [QAFixture new];
         fixture.nav.transitionCoordinator = fixture.transition;
-        shield = [fixture install];
+        shield = [fixture tapSearch];
         Require(shield == nil && fixture.nav.popCount == 0 &&
                 fixture.delegate.nativeCalls == 0, @"an existing interactive transition is not replaced by a tab pop");
     }

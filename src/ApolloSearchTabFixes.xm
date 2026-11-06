@@ -801,13 +801,11 @@ static void ApolloSearchTabScheduleLandingUpdate(UIViewController *vc) {
 
 %end
 
-// UIKit disables the floating dock during a pop, exposing the incoming list
-// to rapid repeat taps. Keep Search's hit target alive until the pop finishes.
 @interface ApolloSearchTabTransitionShield : UIView
 @property (nonatomic, weak) UITabBarController *tabs;
 @property (nonatomic, weak) UINavigationController *navigationController;
 @property (nonatomic, weak) UIViewController *root;
-@property (nonatomic) BOOL focusRequested;
+@property (nonatomic, assign) BOOL focusRequested;
 - (void)repeatSearchTap;
 - (void)finishCancelled:(BOOL)cancelled;
 @end
@@ -834,45 +832,35 @@ static void ApolloSearchTabScheduleLandingUpdate(UIViewController *vc) {
 }
 @end
 
-static ApolloSearchTabTransitionShield *ApolloSearchTabInstallTransitionShield(
-    UITabBarController *tabs, UINavigationController *nav, UIViewController *root
-) {
-    if (!IsLiquidGlass() || nav.viewControllers.count <= 1 || nav.transitionCoordinator ||
-        tabs.presentedViewController || nav.presentedViewController ||
-        nav.topViewController.presentedViewController) return nil;
+static void ApolloSearchTabPopToRoot(UITabBarController *tabs, UINavigationController *nav, UIViewController *root) {
+    BOOL animated = !UIAccessibilityIsReduceMotionEnabled();
+    ApolloSearchTabTransitionShield *shield = nil;
     UIView *host = tabs.viewIfLoaded;
     UITabBar *bar = tabs.tabBar;
-    if (!host.window || bar.window != host.window || bar.hidden || bar.alpha <= 0.01) return nil;
-    CGRect frame = CGRectIntersection(host.bounds, [bar convertRect:bar.bounds toView:host]);
-    if (CGRectIsNull(frame) || CGRectIsEmpty(frame)) return nil;
-
-    ApolloSearchTabTransitionShield *shield = [[ApolloSearchTabTransitionShield alloc] initWithFrame:frame];
-    shield.accessibilityIdentifier = @"ApolloSearchTabTransitionShield";
-    shield.accessibilityElementsHidden = YES;
-    shield.tabs = tabs;
-    shield.navigationController = nav;
-    shield.root = root;
-    [host addSubview:shield];
-    UITabBarItem *item = nav.tabBarItem;
-    id nativeButton = ApolloSendObject(item, @selector(_tabBarButton));
-    if (![nativeButton isKindOfClass:UIView.class]) nativeButton = ApolloObjectIvar(item, "_view");
-    if ([nativeButton isKindOfClass:UIView.class] && [(UIView *)nativeButton window] == bar.window) {
-        UIButton *repeat = [UIButton buttonWithType:UIButtonTypeCustom];
-        repeat.frame = CGRectIntersection(shield.bounds,
-            [(UIView *)nativeButton convertRect:[(UIView *)nativeButton bounds] toView:shield]);
-        [repeat addTarget:shield action:@selector(repeatSearchTap) forControlEvents:UIControlEventTouchDown];
-        [shield addSubview:repeat];
+    if (IsLiquidGlass() && animated && host.window && bar.window == host.window &&
+        !bar.hidden && bar.alpha > 0.01) {
+        CGRect frame = CGRectIntersection(host.bounds, [bar convertRect:bar.bounds toView:host]);
+        if (!CGRectIsNull(frame) && !CGRectIsEmpty(frame)) {
+            shield = [[ApolloSearchTabTransitionShield alloc] initWithFrame:frame];
+            shield.accessibilityIdentifier = @"ApolloSearchTabTransitionShield";
+            shield.accessibilityElementsHidden = YES;
+            shield.tabs = tabs;
+            shield.navigationController = nav;
+            shield.root = root;
+            [host addSubview:shield];
+            UITabBarItem *item = nav.tabBarItem;
+            id nativeButton = ApolloSendObject(item, @selector(_tabBarButton));
+            if (![nativeButton isKindOfClass:UIView.class]) nativeButton = ApolloObjectIvar(item, "_view");
+            if ([nativeButton isKindOfClass:UIView.class] && [(UIView *)nativeButton window] == bar.window) {
+                UIButton *repeat = [UIButton buttonWithType:UIButtonTypeCustom];
+                repeat.frame = CGRectIntersection(shield.bounds,
+                    [(UIView *)nativeButton convertRect:[(UIView *)nativeButton bounds] toView:shield]);
+                [repeat addTarget:shield action:@selector(repeatSearchTap) forControlEvents:UIControlEventTouchDown];
+                [shield addSubview:repeat];
+            }
+        }
     }
-    return shield;
-}
-
-static void ApolloSearchTabPopToRoot(
-    UITabBarController *tabs, UINavigationController *nav, UIViewController *root
-) {
-    ApolloSearchTabTransitionShield *shield = ApolloSearchTabInstallTransitionShield(tabs, nav, root);
-    // UIKit's automatic reselect pop starts AFTER shouldSelect returns. Own
-    // the pop here so the shield observes the actual transition, like Posts.
-    NSArray<UIViewController *> *popped = [nav popToRootViewControllerAnimated:!UIAccessibilityIsReduceMotionEnabled()];
+    NSArray<UIViewController *> *popped = [nav popToRootViewControllerAnimated:animated];
     if (!shield) return;
     BOOL observing = popped.count && [nav.transitionCoordinator animateAlongsideTransition:nil
         completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
