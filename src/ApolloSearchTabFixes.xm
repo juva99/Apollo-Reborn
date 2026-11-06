@@ -801,21 +801,100 @@ static void ApolloSearchTabScheduleLandingUpdate(UIViewController *vc) {
 
 %end
 
+// UIKit disables the floating dock during a pop, exposing the incoming list
+// to rapid repeat taps. Keep Search's hit target alive until the pop finishes.
+@interface ApolloSearchTabTransitionShield : UIView
+@property (nonatomic, weak) UITabBarController *tabs;
+@property (nonatomic, weak) UINavigationController *navigationController;
+@property (nonatomic, weak) UIViewController *root;
+@property (nonatomic) BOOL focusRequested;
+- (void)repeatSearchTap;
+- (void)finishCancelled:(BOOL)cancelled;
+@end
+
+@implementation ApolloSearchTabTransitionShield
+- (void)repeatSearchTap {
+    self.focusRequested = YES;
+}
+
+- (void)finishCancelled:(BOOL)cancelled {
+    [self removeFromSuperview];
+    if (cancelled || !self.focusRequested) return;
+    UITabBarController *tabs = self.tabs;
+    UINavigationController *nav = self.navigationController;
+    UIViewController *root = self.root;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!tabs || !nav || !root || tabs.selectedViewController != nav ||
+            nav.topViewController != root || nav.transitionCoordinator ||
+            tabs.presentedViewController || nav.presentedViewController ||
+            root.presentedViewController || !root.viewIfLoaded.window) return;
+        [ApolloSearchTabSearchBar(root) becomeFirstResponder];
+    });
+}
+@end
+
+static ApolloSearchTabTransitionShield *ApolloSearchTabInstallTransitionShield(
+    UITabBarController *tabs, UINavigationController *nav, UIViewController *root
+) {
+    if (!IsLiquidGlass() || nav.viewControllers.count <= 1 || nav.transitionCoordinator ||
+        tabs.presentedViewController || nav.presentedViewController ||
+        nav.topViewController.presentedViewController) return nil;
+    UIView *host = tabs.viewIfLoaded;
+    UITabBar *bar = tabs.tabBar;
+    if (!host.window || bar.window != host.window || bar.hidden || bar.alpha <= 0.01) return nil;
+    CGRect frame = CGRectIntersection(host.bounds, [bar convertRect:bar.bounds toView:host]);
+    if (CGRectIsNull(frame) || CGRectIsEmpty(frame)) return nil;
+
+    ApolloSearchTabTransitionShield *shield = [[ApolloSearchTabTransitionShield alloc] initWithFrame:frame];
+    shield.accessibilityIdentifier = @"ApolloSearchTabTransitionShield";
+    shield.accessibilityElementsHidden = YES;
+    shield.tabs = tabs;
+    shield.navigationController = nav;
+    shield.root = root;
+    [host addSubview:shield];
+    UITabBarItem *item = nav.tabBarItem;
+    id nativeButton = ApolloSendObject(item, @selector(_tabBarButton));
+    if (![nativeButton isKindOfClass:UIView.class]) nativeButton = ApolloObjectIvar(item, "_view");
+    if ([nativeButton isKindOfClass:UIView.class] && [(UIView *)nativeButton window] == bar.window) {
+        UIButton *repeat = [UIButton buttonWithType:UIButtonTypeCustom];
+        repeat.frame = CGRectIntersection(shield.bounds,
+            [(UIView *)nativeButton convertRect:[(UIView *)nativeButton bounds] toView:shield]);
+        [repeat addTarget:shield action:@selector(repeatSearchTap) forControlEvents:UIControlEventTouchDown];
+        [shield addSubview:repeat];
+    }
+    return shield;
+}
+
+static void ApolloSearchTabObserveTransition(
+    ApolloSearchTabTransitionShield *shield, UINavigationController *nav
+) {
+    if (!shield) return;
+    BOOL observing = [nav.transitionCoordinator animateAlongsideTransition:nil
+        completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+            [shield finishCancelled:context.isCancelled];
+        }];
+    if (!observing) [shield removeFromSuperview];
+}
+
 // Apollo requires an exact top-offset match before focusing Search (0x10008907c).
 // Handle Search-root re-selection here so subpixel offsets cannot block focus.
 %hook ApolloSearchTabSceneDelegate
 
 - (BOOL)tabBarController:(UITabBarController *)tabs
  shouldSelectViewController:(UIViewController *)page {
-    if (page != tabs.selectedViewController ||
-        ![page isKindOfClass:UINavigationController.class]) {
+    if (![page isKindOfClass:UINavigationController.class]) {
         return %orig(tabs, page);
     }
     UINavigationController *nav = (UINavigationController *)page;
     UIViewController *root = nav.viewControllers.firstObject;
-    if (nav.viewControllers.count != 1 ||
-        ![root isKindOfClass:objc_getClass("_TtC6Apollo20SearchViewController")]) {
+    if (![root isKindOfClass:objc_getClass("_TtC6Apollo20SearchViewController")]) {
         return %orig(tabs, page);
+    }
+    if (page != tabs.selectedViewController || nav.viewControllers.count != 1) {
+        ApolloSearchTabTransitionShield *shield = ApolloSearchTabInstallTransitionShield(tabs, nav, root);
+        BOOL allowed = %orig(tabs, page);
+        ApolloSearchTabObserveTransition(shield, nav);
+        return allowed;
     }
     if (tabs.presentedViewController || nav.presentedViewController ||
         root.presentedViewController || nav.transitionCoordinator ||
